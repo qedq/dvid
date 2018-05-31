@@ -5,6 +5,7 @@ package labelmap
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/janelia-flyem/dvid/datastore"
@@ -13,6 +14,117 @@ import (
 	"github.com/janelia-flyem/dvid/dvid"
 	"github.com/janelia-flyem/dvid/storage"
 )
+
+func writeToFile(f *os.File, format string, args ...interface{}) {
+	f.WriteString(fmt.Sprintf(format, args...))
+}
+
+func (d *Data) Fix(uuid dvid.UUID, outfile string) error {
+	v, err := datastore.VersionFromUUID(uuid)
+	if err != nil {
+		return err
+	}
+	ctx := datastore.NewVersionedCtx(d, v)
+	f, err := os.OpenFile(outfile, os.O_WRONLY|os.O_CREATE, 0755)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	svm, err := getMapping(d, v)
+	if err != nil {
+		return err
+	}
+	vid, err := svm.createShortVersion(v)
+	if err != nil {
+		return err
+	}
+	var mappingsFixed int
+	timedLog := dvid.NewTimeLog()
+	ch := make(chan storage.LogMessage, 100)
+	wg := new(sync.WaitGroup)
+
+	go func(vid uint8, ch chan storage.LogMessage, wg *sync.WaitGroup) {
+		numMsgs := 0
+		for msg := range ch {
+			numMsgs++
+			if msg.EntryType != proto.SplitOpType {
+				wg.Done()
+				continue
+			}
+			var op proto.SplitOp
+			if err := op.Unmarshal(msg.Data); err != nil {
+				writeToFile(f, "unable to unmarshal split log message %d for version %d: %v\n", numMsgs, v, err)
+				wg.Done()
+				continue
+			}
+			remainIdx, err := getLabelIndex(ctx, op.Target)
+			if err != nil {
+				writeToFile(f, "unable to get label index for remaining label %d in split: %v\n", op.Target, err)
+				wg.Done()
+				continue
+			}
+			remainSupervoxels := remainIdx.GetSupervoxels()
+			if len(remainSupervoxels) != 1 {
+				writeToFile(f, "Split %d -> %d.  Remaining index has multiple supervoxels: %s\n", op.Target, op.Newlabel, remainSupervoxels)
+			} else {
+				mappingsFixed++
+				svm.Lock()
+				sv := remainSupervoxels.Nth(0)
+				vm := svm.fm[sv]
+				newvm, changed := vm.modify(vid, op.Target)
+				if changed {
+					svm.fm[sv] = newvm
+				}
+				svm.Unlock()
+				mop := labels.MappingOp{
+					MutID:    op.Mutid,
+					Mapped:   op.Target,
+					Original: remainSupervoxels,
+				}
+				if err := labels.LogMapping(d, v, mop); err != nil {
+					writeToFile(f, "unable to write mapping to log for op %v: %v\n", mop, err)
+				}
+			}
+			splitIdx, err := getLabelIndex(ctx, op.Newlabel)
+			if err != nil {
+				writeToFile(f, "unable to get label index for split label %d: %v\n", op.Newlabel, err)
+				wg.Done()
+				continue
+			}
+			splitSupervoxels := splitIdx.GetSupervoxels()
+			if len(splitSupervoxels) != 1 {
+				writeToFile(f, "Split %d -> %d.  Split index has multiple supervoxels: %s\n", op.Target, op.Newlabel, splitSupervoxels)
+			} else {
+				mappingsFixed++
+				svm.Lock()
+				sv := splitSupervoxels.Nth(0)
+				vm := svm.fm[sv]
+				newvm, changed := vm.modify(vid, op.Newlabel)
+				if changed {
+					svm.fm[sv] = newvm
+				}
+				svm.Unlock()
+				mop := labels.MappingOp{
+					MutID:    op.Mutid,
+					Mapped:   op.Target,
+					Original: splitSupervoxels,
+				}
+				if err := labels.LogMapping(d, v, mop); err != nil {
+					writeToFile(f, "unable to write mapping to log for op %v: %v\n", mop, err)
+				}
+			}
+			writeToFile(f, "Presumptive supervoxel %d split into %s, remains into %s\n", op.Target, splitSupervoxels, remainSupervoxels)
+
+			wg.Done()
+		}
+	}(vid, ch, wg)
+	if err := labels.StreamLog(d, v, ch, wg); err != nil {
+		return err
+	}
+	wg.Wait()
+	timedLog.Infof("fixed data %q: %d sv mappings updated\n", d.DataName(), mappingsFixed)
+	return nil
+}
 
 func (d *Data) ingestMappings(ctx *datastore.VersionedCtx, mappings proto.MappingOps) error {
 	m, err := getMapping(d, ctx.VersionID())

@@ -283,6 +283,12 @@ type Initializer interface {
 	Initialize()
 }
 
+// FixableData is a data instance that can be "fixed" in some type-specific way.
+// This is a type-specific implementation that can be used to clean-up or repair data.
+type FixableData interface {
+	Fix(uuid dvid.UUID, outfile string) error
+}
+
 type Updater struct {
 	updates uint32
 	sync.RWMutex

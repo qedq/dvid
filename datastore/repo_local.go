@@ -1962,6 +1962,25 @@ func (m *repoManager) modifyDataByName(uuid dvid.UUID, name dvid.InstanceName, c
 	return r.save()
 }
 
+func (m *repoManager) fixInstance(uuid dvid.UUID, name dvid.InstanceName, outfile string) error {
+	r, err := m.repoFromUUID(uuid)
+	if err != nil {
+		return err
+	}
+
+	r.RLock()
+	data, found := r.data[name]
+	r.RUnlock()
+	if !found || data.IsDeleted() {
+		return ErrInvalidDataName
+	}
+	fixable, ok := data.(FixableData)
+	if !ok {
+		return fmt.Errorf("data %q is of a type that has no support for fixing", name)
+	}
+	return fixable.Fix(uuid, outfile)
+}
+
 // repoT encapsulates everything we need to know about a repository.
 // Note that changes to the DAG, e.g., adding a child node, will need updates
 // to the cached maps in the RepoManager, so there is a pointer to it.

@@ -367,13 +367,26 @@ func (m *Mapping) delete(label uint64) {
 // Set is a set of labels.
 type Set map[uint64]struct{}
 
-// Merge returns a set made of the given labels.
+// NewSet returns a set made of the given labels.
 func NewSet(lbls ...uint64) Set {
 	s := make(Set, len(lbls))
 	for _, label := range lbls {
 		s[label] = struct{}{}
 	}
 	return s
+}
+
+// Nth returns the nth element (zero indexing) in the Set, which is not in numeric order.
+// Returns 0 if n is larger than elements in Set.
+func (s Set) Nth(n int) uint64 {
+	i := 0
+	for label := range s {
+		if i == n {
+			return label
+		}
+		i++
+	}
+	return 0
 }
 
 // Merge adds the elements in the given set to the receiver.

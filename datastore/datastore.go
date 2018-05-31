@@ -360,6 +360,13 @@ func ModifyDataConfigByName(uuid dvid.UUID, name dvid.InstanceName, c dvid.Confi
 	return manager.modifyDataByName(uuid, name, c)
 }
 
+func FixInstance(uuid dvid.UUID, name dvid.InstanceName, outfile string) error {
+	if manager == nil {
+		return ErrManagerNotInitialized
+	}
+	return manager.fixInstance(uuid, name, outfile)
+}
+
 // ------ Cross-platform k/v pair matching for given version, necessary for versioned get.
 
 type kvvNode struct {

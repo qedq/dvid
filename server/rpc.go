@@ -63,6 +63,12 @@ DANGEROUS COMMANDS (only available via command line)
 
 EXPERIMENTAL COMMANDS
 
+	repo <UUID> fix <instance name> <output file>
+
+		General command to fix data for instance in some type-specific way with
+		the option of some data being dumped to the output file.  This command
+		can be used with the labelmap data type.
+
 	repo <UUID> migrate <instance name> <old store config nickname> <settings...>
     
         Migrates all data from an old store (specified by the nickname in TOML file)
@@ -476,6 +482,17 @@ func handleCommand(cmd *datastore.Request) (reply *datastore.Response, err error
 				return
 			}
 			reply.Text = fmt.Sprintf("Started deletion of data instance %q from repo with root %s\n", dataname, uuid)
+
+		case "fix":
+			// experimental command to let data instances get fixed.
+			var name, outfile string
+			cmd.CommandArgs(3, &name, &outfile)
+			go func() {
+				if err := datastore.FixInstance(uuid, dvid.InstanceName(name), outfile); err != nil {
+					dvid.Errorf("issue with verify on %q: %v\n", name, err)
+				}
+			}()
+			reply.Text = fmt.Sprintf("Started fix of data %q in repo %s with output file %q\n", name, uuid, outfile)
 
 		default:
 			err = fmt.Errorf("Unknown command: %q", cmd)
