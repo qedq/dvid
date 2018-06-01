@@ -591,7 +591,6 @@ func (d *Data) splitSupervoxelBlock(ctx *datastore.VersionedCtx, op splitSupervo
 			dvid.Errorf("can't store split supervoxel %d RLEs into block %s: %v\n", op.Supervoxel, op.bcoord, err)
 			return
 		}
-		dvid.Infof("Split block %s, label %d -> %d, %d: kept %d voxels, split %d voxels\n", pb.BCoord, op.Supervoxel, op.SplitSupervoxel, op.RemainSupervoxel, keptSize, toLabelSize)
 	}
 
 	splitpb := labels.PositionedBlock{*splitBlock, op.bcoord}

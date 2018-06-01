@@ -304,6 +304,13 @@ else ()
         WORKING_DIRECTORY   ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT     "Compiling and installing dvid transfer command...")
 
+    # Build transfer-splits command 
+    add_custom_target (transfer-splits
+        ${BUILDEM_ENV_STRING} ${GO_ENV} ${CGO_FLAGS} go build  -o ${BUILDEM_BIN_DIR}/transfer-splits 
+        -v -tags '${DVID_BACKEND}' cmd/transfer-splits/*.go
+        WORKING_DIRECTORY   ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT     "Compiling and installing dvid transfer-splits command...")
+
     # Create dvid-distro directory off buildem directory
     set (DISTRO_DIR ${BUILDEM_DIR}/dvid-distro)
     add_custom_target (mkdir-distro
