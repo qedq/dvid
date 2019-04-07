@@ -26,6 +26,7 @@ import (
 	// Declare the data types this DVID executable will support
 	_ "github.com/janelia-flyem/dvid/datatype/annotation"
 	_ "github.com/janelia-flyem/dvid/datatype/googlevoxels"
+	_ "github.com/janelia-flyem/dvid/datatype/bossuint8blk"
 	_ "github.com/janelia-flyem/dvid/datatype/imageblk"
 	_ "github.com/janelia-flyem/dvid/datatype/imagetile"
 	_ "github.com/janelia-flyem/dvid/datatype/keyvalue"
