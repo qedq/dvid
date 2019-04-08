@@ -13,6 +13,7 @@ import (
 	"strings"
 	"os"
 	"time"
+	"bytes"
 
 	"github.com/janelia-flyem/dvid/datastore"
 	"github.com/janelia-flyem/dvid/dvid"
@@ -266,6 +267,47 @@ func (dtype *Type) Do(cmd datastore.Request, reply *datastore.Response) error {
 	return fmt.Errorf("unknown command for type %s", dtype.GetTypeName())
 }
 
+
+func (d *Data) GobDecode(b []byte) error {
+	buf := bytes.NewBuffer(b)
+	dec := gob.NewDecoder(buf)
+	if err := dec.Decode(&(d.Data)); err != nil {
+		return err
+	}
+	if err := dec.Decode(&(d.Properties)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *Data) GobEncode() ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	if err := enc.Encode(d.Data); err != nil {
+		return nil, err
+	}
+	if err := enc.Encode(d.Properties); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// CopyPropertiesFrom copies the data instance-specific properties from a given
+// data instance into the receiver's properties. Fulfills the datastore.PropertyCopier interface.
+func (d *Data) CopyPropertiesFrom(src datastore.DataService, fs storage.FilterSpec) error {
+	d2, ok := src.(*Data)
+	if !ok {
+		return fmt.Errorf("unable to copy properties from non-imageblk data %q", src.DataName())
+	}
+
+	d.Collection = d2.Collection
+	d.Experiment = d2.Experiment
+	d.Channel = d2.Channel
+	d.Frame = d2.Frame
+
+	return nil
+}
+
 func (dtype *Type) Help() string {
 	return helpMessage
 }
@@ -305,14 +347,21 @@ func (d *Data) DoRPC(request datastore.Request, reply *datastore.Response) error
 }
 
 func (d *Data) MarshalJSON() ([]byte, error) {
-	// ?! replace boss with uint8blk ??
-	return json.Marshal(struct {
+	metabytes, err := json.Marshal(struct {
 		Base     *datastore.Data
 		Extended Properties
 	}{
 		d.Data,
 		d.Properties,
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	// temporary hack to make "bossuint8blk" look like "uint8blk"
+	// TODO: refactor DVID to allow for a list of supported interfaces
+	metabytes = bytes.Replace(metabytes,  []byte("bossuint8blk"), []byte("uint8blk"), 1) 
+	return metabytes, nil
 }
 
 
