@@ -20,6 +20,7 @@ import (
 	"github.com/janelia-flyem/dvid/dvid"
 	"github.com/janelia-flyem/dvid/server"
 	"github.com/janelia-flyem/dvid/storage"
+	"github.com/janelia-flyem/dvid/datatype/imageblk"
 )
 
 const (
@@ -30,8 +31,11 @@ const (
 	ExperimentInfo = "https://api.theboss.io/v1/collection/%s/experiment/%s"
 	FrameInfo = "https://api.theboss.io/v1/coord/%s"
 
+	// collection, experiment, channel
+	DownsampleInfo = "https://api.theboss.io/v1/downsample/%s/%s/%s?iso=true"
+
+
 	// https://api.theboss.io/v1/cutout/:collection/:experiment/:channel/:res/:xmin:xmax/:ymin::ymax/:zmin::zmax
-	// ?! how is downsampling done ??
 	CutOut = "https://api.theboss.io/v1/cutout/%s/%s/%s/%d/%d:%d/%d:%d/%d:%d"
 )
 
@@ -61,6 +65,8 @@ $ dvid repo <UUID> new bossuint8blk <data name> <settings...>
     collection     Name of BOSS collection
     experiment     Name of BOSS experiment
     channel        Name of BOSS channel in experiment (must be 8bit)
+    level	   Downsample level to access channel (default: 0)
+    background     Integer value that signifies background in any element (default: 0)
 
     ------------------
 
@@ -150,7 +156,105 @@ type Properties struct {
 	Experiment string
 	Channel string
 	Frame string
-	Level	int
+	Scale	int
+
+	// Block size for this repo
+	// For now, just do 64,64,64 and not native blocks
+	// TODO: support native block resolution
+	BlockSize dvid.Point
+
+	// resolution determined by BOSS downsampling service
+	dvid.Resolution
+
+	// leave field in metadata but no longer updated!!
+	dvid.Extents
+
+	// Background value for data (0 by default)
+	Background uint8
+
+}
+
+
+func (d *Data) Extents() *dvid.Extents {
+	return &(d.Properties.Extents)
+}
+
+// retrieveImageDetails determined the resolution for the specified scale level
+func retrieveImageDetails(scalestr string, collection string, experiment string, frame string, channel string, blockSize dvid.Point) (dvid.Resolution, dvid.Extents, error) {
+	var resolution dvid.Resolution
+	var extents dvid.Extents
+
+	bossClient := http.Client{
+		Timeout: time.Second * 60,
+	}
+
+	// assume nanometers is the only unit for now
+	// TODO: read dynamically from the frame
+	
+	// request frame info to get voxel units
+	req_url := fmt.Sprintf(DownsampleInfo, collection, experiment, channel) 
+	req, err := http.NewRequest(http.MethodGet, req_url, nil)
+	if err != nil {
+		return resolution, extents, err
+	}
+	
+	// set authorization token
+	err = setAuthorization(req)
+	if err != nil {
+		return resolution, extents, err
+	}
+
+	// perform request
+	res, err := bossClient.Do(req)
+	if err != nil {
+		return resolution, extents, fmt.Errorf("request failed")
+	}
+
+	downbody, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return resolution, extents, fmt.Errorf("request failed")
+	}
+	res.Body.Close()
+
+	// read json
+	var down struct {
+		ScaleExtents	map[string][]int32 `json:"extent"`
+		VoxelSizes	map[string][]float32 `json:"voxel_size"`
+	}
+	if err = json.Unmarshal(downbody, &down); err != nil {
+		return resolution, extents, err
+	}
+
+	var maxbound []int32
+	ok := true
+	if maxbound, ok =  down.ScaleExtents[scalestr]; !ok {
+		return resolution, extents, fmt.Errorf("Bounding box not found for scale")
+	}
+	var voxelsize []float32
+	if voxelsize, ok =  down.VoxelSizes[scalestr]; !ok {
+		return resolution, extents, fmt.Errorf("Voxel size not found for scale")
+	}
+
+	// init resolution datastructure
+	resolution.VoxelSize = make(dvid.NdFloat32, 3)
+	for d := 0; d < 3; d++ {
+		resolution.VoxelSize[d] = voxelsize[d]
+	}
+	resolution.VoxelUnits = make(dvid.NdString, 3)
+	for d := 0; d < 3; d++ {
+		resolution.VoxelUnits[d] = "nanometers"
+	}
+
+	// init extents
+	blockSize3d, ok := blockSize.(dvid.Point3d)
+	minpoint := dvid.Point3d{0, 0, 0}
+	extents.MinPoint = minpoint 
+	maxpoint := dvid.Point3d{maxbound[0]-1, maxbound[1]-1, maxbound[2]-1}
+	extents.MaxPoint = maxpoint 
+	extents.MinIndex = minpoint.ChunkIndexer(blockSize3d)
+	extents.MaxIndex = maxpoint.ChunkIndexer(blockSize3d)
+
+	return resolution, extents, nil
 }
 
 // --- TypeService interface ---
@@ -182,14 +286,34 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 		return nil, fmt.Errorf("Cannot make bossuint8blk data without channel name 'channel' setting.")
 	}
 
-	levelstr, found, err := c.GetString("level")
+	scalestr, found, err := c.GetString("scale")
 	if err != nil {
 		return nil, err
 	}
-	if !found {
-		return nil, fmt.Errorf("Cannot make bossuint8blk data without level name 'level' setting.")
+	scale := 0
+	if found {
+		scale, err = strconv.Atoi(scalestr)	
+		if err != nil {
+			return nil, err
+		}
 	}
-	level, err := strconv.Atoi(levelstr)	
+
+	// set imageblk properties 
+	s, found, err := c.GetString("background")
+	if err != nil {
+		return nil, err
+	}
+	background_final := uint8(0)
+	if found {
+		background, err := strconv.ParseUint(s, 10, 8)
+		if err != nil {
+			return nil, err
+		}
+		background_final = uint8(background)
+	}
+
+	// treat block size as 64,64,64 for now
+	blockSize, err := dvid.StringToPoint("64,64,64", ",")
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +369,10 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 	// load frame
 	frame := exp.Coord_frame
 
+	if scale >= exp.Num_hierarchy_levels {
+		return nil, fmt.Errorf("Provided scale is greater than the max level")
+	}
+
 	// check if the channel exists
 	foundch := false
 	for _,  v := range exp.Channels {
@@ -257,7 +385,12 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 		return nil, fmt.Errorf("specified channel does not exist")
 	}
 
-	// ?! parse extents and load into DVID idiomatically?? -- study extents
+	// load extents and voxel size information
+	resolution, extents, err := retrieveImageDetails(scalestr, collection, experiment, frame, channel, blockSize)
+	if err != nil {
+		return nil, err
+	}
+
 	// initialize the bossuint8blk data
 	basedata, err := datastore.NewDataService(dtype, uuid, id, name, c)
 	if err != nil {
@@ -270,7 +403,11 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 			Experiment:     experiment,
 			Channel:	channel,
 			Frame:		frame,
-			Level: 		level,
+			Scale: 		scale,
+			BlockSize:	blockSize,
+			Background:	background_final,
+			Resolution:	resolution,
+			Extents:	extents,
 		},
 		client: &bossClient,
 	}
@@ -319,6 +456,15 @@ func (d *Data) CopyPropertiesFrom(src datastore.DataService, fs storage.FilterSp
 	d.Experiment = d2.Experiment
 	d.Channel = d2.Channel
 	d.Frame = d2.Frame
+	d.Scale = d2.Scale
+	
+	d.BlockSize = d2.BlockSize.Duplicate()
+	d.Properties.Extents = d2.Properties.Extents.Duplicate()
+	d.Resolution.VoxelSize = make(dvid.NdFloat32, 3)
+	copy(d.Resolution.VoxelSize, d2.Resolution.VoxelSize)
+	d.Resolution.VoxelUnits = make(dvid.NdString, 3)
+	copy(d.Resolution.VoxelUnits, d2.Resolution.VoxelUnits)
+	d.Background = d2.Background
 
 	return nil
 }
@@ -379,6 +525,38 @@ func (d *Data) MarshalJSON() ([]byte, error) {
 	return metabytes, nil
 }
 
+func (d *Data) MarshalJSONExtents(ctx *datastore.VersionedCtx) ([]byte, error) {
+	// grab extent property and load
+	// TODO?: re-read extents and update meta (handles change in extents)
+	/*extents, err := d.GetExtents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	*/
+
+	var extentsJSON imageblk.ExtentsJSON
+	extentsJSON.MinPoint = d.Properties.MinPoint
+	extentsJSON.MaxPoint = d.Properties.MaxPoint
+
+	metabytes, err := json.Marshal(struct {
+		Base     *datastore.Data
+		Extended Properties
+		Extents  imageblk.ExtentsJSON
+	}{
+		d.Data,
+		d.Properties,
+		extentsJSON,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// temporary hack to make "bossuint8blk" look like "uint8blk"
+	// TODO: refactor DVID to allow for a list of supported interfaces
+	metabytes = bytes.Replace(metabytes,  []byte("bossuint8blk"), []byte("uint8blk"), 1) 
+	return metabytes, nil
+}
+
 
 // ServeHTTP handles all incoming HTTP requests for this data.
 func (d *Data) ServeHTTP(uuid dvid.UUID, ctx *datastore.VersionedCtx, w http.ResponseWriter, r *http.Request) (activity map[string]interface{}) {
@@ -410,7 +588,7 @@ func (d *Data) ServeHTTP(uuid dvid.UUID, ctx *datastore.VersionedCtx, w http.Res
 		fmt.Fprintln(w, d.Help())
 
 	case "info":
-		jsonBytes, err := d.MarshalJSON()
+		jsonBytes, err := d.MarshalJSONExtents(ctx)
 		if err != nil {
 			server.BadRequest(w, r, err)
 			return
