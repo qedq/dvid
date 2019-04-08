@@ -14,6 +14,7 @@ import (
 	"os"
 	"time"
 	"bytes"
+	"strconv"
 
 	"github.com/janelia-flyem/dvid/datastore"
 	"github.com/janelia-flyem/dvid/dvid"
@@ -149,6 +150,7 @@ type Properties struct {
 	Experiment string
 	Channel string
 	Frame string
+	Level	int
 }
 
 // --- TypeService interface ---
@@ -178,6 +180,18 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 	}
 	if !found {
 		return nil, fmt.Errorf("Cannot make bossuint8blk data without channel name 'channel' setting.")
+	}
+
+	levelstr, found, err := c.GetString("level")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("Cannot make bossuint8blk data without level name 'level' setting.")
+	}
+	level, err := strconv.Atoi(levelstr)	
+	if err != nil {
+		return nil, err
 	}
 
 	// create client
@@ -256,6 +270,7 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 			Experiment:     experiment,
 			Channel:	channel,
 			Frame:		frame,
+			Level: 		level,
 		},
 		client: &bossClient,
 	}
