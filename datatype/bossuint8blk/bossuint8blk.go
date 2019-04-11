@@ -5,24 +5,24 @@ mostly fulling the uint8blk interface.
 package bossuint8blk
 
 import (
+	"bytes"
 	"encoding/gob"
 	"encoding/json"
-	"image/jpeg"
-	"image"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io/ioutil"
 	"net/http"
-	"strings"
 	"os"
-	"time"
-	"bytes"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/janelia-flyem/dvid/datastore"
+	"github.com/janelia-flyem/dvid/datatype/imageblk"
 	"github.com/janelia-flyem/dvid/dvid"
 	"github.com/janelia-flyem/dvid/server"
 	"github.com/janelia-flyem/dvid/storage"
-	"github.com/janelia-flyem/dvid/datatype/imageblk"
 	lz4 "github.com/janelia-flyem/go/golz4-updated"
 )
 
@@ -32,11 +32,10 @@ const (
 	TypeName = "bossuint8blk"
 
 	ExperimentInfo = "https://api.theboss.io/v1/collection/%s/experiment/%s"
-	FrameInfo = "https://api.theboss.io/v1/coord/%s"
+	FrameInfo      = "https://api.theboss.io/v1/coord/%s"
 
 	// collection, experiment, channel
 	DownsampleInfo = "https://api.theboss.io/v1/downsample/%s/%s/%s?iso=true"
-
 
 	// https://api.theboss.io/v1/cutout/:collection/:experiment/:channel/:res/:xmin:xmax/:ymin::ymax/:zmin::zmax
 	CutOut = "https://api.theboss.io/v1/cutout/%s/%s/%s/%d/%d:%d/%d:%d/%d:%d?iso=true"
@@ -138,8 +137,8 @@ GET  <api URL>/node/<UUID>/<data name>/raw/<dims>/<size>/<offset>[/<format>][?qu
 `
 
 var (
-	DefaultBlkSize   int32  = 64
-	BOSSToken	string = ""
+	DefaultBlkSize int32  = 64
+	BOSSToken      string = ""
 )
 
 func init() {
@@ -148,7 +147,7 @@ func init() {
 	// Need to register types that will be used to fulfill interfaces.
 	gob.Register(&Type{})
 	gob.Register(&Data{})
-	
+
 	// check for token on startup
 	loadToken()
 }
@@ -164,14 +163,13 @@ func setAuthorization(req *http.Request) error {
 	// Load environment variable (if not already loaded)
 	loadToken()
 	if BOSSToken == "" {
-		return fmt.Errorf("no BOSS token: set BOSS_APPLICATION_CREDENTIALS")	
+		return fmt.Errorf("no BOSS token: set BOSS_APPLICATION_CREDENTIALS")
 	}
 	authstr := fmt.Sprintf("Token %s", BOSSToken)
 	req.Header.Set("Authorization", authstr)
 
 	return nil
 }
-
 
 type Type struct {
 	datastore.Type
@@ -191,16 +189,15 @@ func NewType() *Type {
 	}
 }
 
-
 // Properties are additional properties for keyvalue data instances beyond those
 // in standard datastore.Data.   These will be persisted to metadata storage.
 type Properties struct {
 	// Necessary information to select data from BOSS API.
 	Collection string
 	Experiment string
-	Channel string
-	Frame string
-	Scale	int
+	Channel    string
+	Frame      string
+	Scale      int
 
 	// Block size for this repo
 	// For now, just do 64,64,64 and not native blocks
@@ -215,9 +212,7 @@ type Properties struct {
 
 	// Background value for data (0 by default)
 	Background uint8
-
 }
-
 
 func (d *Data) Extents() *dvid.Extents {
 	return &(d.Properties.Extents)
@@ -234,14 +229,14 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 
 	// assume nanometers is the only unit for now
 	// TODO: read dynamically from the frame
-	
+
 	// request frame info to get voxel units
-	req_url := fmt.Sprintf(DownsampleInfo, collection, experiment, channel) 
+	req_url := fmt.Sprintf(DownsampleInfo, collection, experiment, channel)
 	req, err := http.NewRequest(http.MethodGet, req_url, nil)
 	if err != nil {
 		return resolution, extents, err
 	}
-	
+
 	// set authorization token
 	err = setAuthorization(req)
 	if err != nil {
@@ -262,8 +257,8 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 
 	// read json
 	var down struct {
-		ScaleExtents	map[string][]int32 `json:"extent"`
-		VoxelSizes	map[string][]float32 `json:"voxel_size"`
+		ScaleExtents map[string][]int32   `json:"extent"`
+		VoxelSizes   map[string][]float32 `json:"voxel_size"`
 	}
 	if err = json.Unmarshal(downbody, &down); err != nil {
 		return resolution, extents, err
@@ -271,11 +266,11 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 
 	var maxbound []int32
 	ok := true
-	if maxbound, ok =  down.ScaleExtents[scalestr]; !ok {
+	if maxbound, ok = down.ScaleExtents[scalestr]; !ok {
 		return resolution, extents, fmt.Errorf("Bounding box not found for scale")
 	}
 	var voxelsize []float32
-	if voxelsize, ok =  down.VoxelSizes[scalestr]; !ok {
+	if voxelsize, ok = down.VoxelSizes[scalestr]; !ok {
 		return resolution, extents, fmt.Errorf("Voxel size not found for scale")
 	}
 
@@ -292,9 +287,9 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 	// init extents
 	blockSize3d, ok := blockSize.(dvid.Point3d)
 	minpoint := dvid.Point3d{0, 0, 0}
-	extents.MinPoint = minpoint 
-	maxpoint := dvid.Point3d{maxbound[0]-1, maxbound[1]-1, maxbound[2]-1}
-	extents.MaxPoint = maxpoint 
+	extents.MinPoint = minpoint
+	maxpoint := dvid.Point3d{maxbound[0] - 1, maxbound[1] - 1, maxbound[2] - 1}
+	extents.MaxPoint = maxpoint
 	extents.MinIndex = minpoint.ChunkIndexer(blockSize3d)
 	extents.MaxIndex = maxpoint.ChunkIndexer(blockSize3d)
 
@@ -336,13 +331,13 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 	}
 	scale := 0
 	if found {
-		scale, err = strconv.Atoi(scalestr)	
+		scale, err = strconv.Atoi(scalestr)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	// set imageblk properties 
+	// set imageblk properties
 	s, found, err := c.GetString("background")
 	if err != nil {
 		return nil, err
@@ -368,12 +363,12 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 	}
 
 	// request experiment info
-	req_url := fmt.Sprintf(ExperimentInfo, collection, experiment) 
+	req_url := fmt.Sprintf(ExperimentInfo, collection, experiment)
 	req, err := http.NewRequest(http.MethodGet, req_url, nil)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// set authorization token
 	err = setAuthorization(req)
 	if err != nil {
@@ -394,22 +389,22 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 
 	// load experiment info (ensure channel exists, retrieve frame name, and max res)
 	var exp struct {
-		Channels []string `json:"channels"`
-		Name string `json:"name"`
-		Description string `json:"description"`
-		Collection string `json:"collection"`
-		Coord_frame string `json:"coord_frame"`
-		Num_hierarchy_levels int `json:"num_hierarchy_levels"`
-		Hierarchy_method string `json:"hierarchy_method"`
-		Num_time_samples int `json:"num_time_samples"`
-		Time_step int `json:"time_stemp"`
-		Time_step_unit string `json:"time_step_unit"`
-		Creator string `json:"creator"`
+		Channels             []string `json:"channels"`
+		Name                 string   `json:"name"`
+		Description          string   `json:"description"`
+		Collection           string   `json:"collection"`
+		Coord_frame          string   `json:"coord_frame"`
+		Num_hierarchy_levels int      `json:"num_hierarchy_levels"`
+		Hierarchy_method     string   `json:"hierarchy_method"`
+		Num_time_samples     int      `json:"num_time_samples"`
+		Time_step            int      `json:"time_stemp"`
+		Time_step_unit       string   `json:"time_step_unit"`
+		Creator              string   `json:"creator"`
 	}
 	if err = json.Unmarshal(expbody, &exp); err != nil {
 		return nil, err
 	}
-	
+
 	// load frame
 	frame := exp.Coord_frame
 
@@ -419,7 +414,7 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 
 	// check if the channel exists
 	foundch := false
-	for _,  v := range exp.Channels {
+	for _, v := range exp.Channels {
 		if v == channel {
 			foundch = true
 			break
@@ -443,15 +438,15 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 	data := &Data{
 		Data: basedata,
 		Properties: Properties{
-			Collection:     collection,
-			Experiment:     experiment,
-			Channel:	channel,
-			Frame:		frame,
-			Scale: 		scale,
-			BlockSize:	blockSize,
-			Background:	background_final,
-			Resolution:	resolution,
-			Extents:	extents,
+			Collection: collection,
+			Experiment: experiment,
+			Channel:    channel,
+			Frame:      frame,
+			Scale:      scale,
+			BlockSize:  blockSize,
+			Background: background_final,
+			Resolution: resolution,
+			Extents:    extents,
 		},
 		client: &bossClient,
 	}
@@ -467,12 +462,12 @@ func (dtype *Type) Do(cmd datastore.Request, reply *datastore.Response) error {
 // This function does not handle patching or writing to http.
 func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr string) ([]byte, error) {
 	timedLog := dvid.NewTimeLog()
-	
+
 	client, err := d.GetClient()
 	if err != nil {
 		return nil, err
 	}
-	
+
 	url := fmt.Sprintf(CutOut, d.Collection, d.Experiment, d.Channel, d.Scale, offset[0], offset[0]+size[0], offset[1], offset[1]+size[1], offset[2], offset[2]+size[2])
 	fmt.Println(url)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -498,14 +493,14 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 	}
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err	
+		return nil, err
 	}
 
 	if formatstr == "jpeg" || formatstr == "jpg" {
 		return data, nil
 	}
-	
-	// decompress JPEG 
+
+	// decompress JPEG
 	b := bytes.NewBuffer(data)
 	imgdata, err := jpeg.Decode(b)
 	if err != nil {
@@ -521,7 +516,7 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 			return nil, err
 		}
 		return lz4data, nil
-	default: // raw binary 
+	default: // raw binary
 		return data, nil
 	}
 	return data, nil
@@ -564,7 +559,7 @@ func (d *Data) CopyPropertiesFrom(src datastore.DataService, fs storage.FilterSp
 	d.Channel = d2.Channel
 	d.Frame = d2.Frame
 	d.Scale = d2.Scale
-	
+
 	d.BlockSize = d2.BlockSize.Duplicate()
 	d.Properties.Extents = d2.Properties.Extents.Duplicate()
 	d.Resolution.VoxelSize = make(dvid.NdFloat32, 3)
@@ -596,11 +591,10 @@ func (d *Data) GetClient() (*http.Client, error) {
 	}
 
 	d.client = &http.Client{
-			Timeout: time.Second * 60,
+		Timeout: time.Second * 60,
 	}
 	return d.client, nil
 }
-
 
 // --- DataService interface ---
 
@@ -626,29 +620,28 @@ func (d *Data) BackgroundBlock() []byte {
 // 2) creating a blank block, 3) filling in the blank block with something
 // like the following:
 /*
-		blockOffset := blockBegX * bytesPerVoxel
-		dX := int64(v.Size().Value(0)) * bytesPerVoxel
-		dY := int64(v.Size().Value(1)) * dX
-		dataOffset := int64(dataBeg.Value(0)) * bytesPerVoxel
-		bytes := int64(dataEnd.Value(0)-dataBeg.Value(0)+1) * bytesPerVoxel
-		blockZ := blockBegZ
+	blockOffset := blockBegX * bytesPerVoxel
+	dX := int64(v.Size().Value(0)) * bytesPerVoxel
+	dY := int64(v.Size().Value(1)) * dX
+	dataOffset := int64(dataBeg.Value(0)) * bytesPerVoxel
+	bytes := int64(dataEnd.Value(0)-dataBeg.Value(0)+1) * bytesPerVoxel
+	blockZ := blockBegZ
 
-		for dataZ := int64(dataBeg.Value(2)); dataZ <= int64(dataEnd.Value(2)); dataZ++ {
-			blockY := blockBegY
-			for dataY := int64(dataBeg.Value(1)); dataY <= int64(dataEnd.Value(1)); dataY++ {
-				dataI := dataZ*dY + dataY*dX + dataOffset
-				blockI := blockZ*bY + blockY*bX + blockOffset
-				copy(block.V[blockI:blockI+bytes], data[dataI:dataI+bytes])
-				blockY++
-			}
-			blockZ++
+	for dataZ := int64(dataBeg.Value(2)); dataZ <= int64(dataEnd.Value(2)); dataZ++ {
+		blockY := blockBegY
+		for dataY := int64(dataBeg.Value(1)); dataY <= int64(dataEnd.Value(1)); dataY++ {
+			dataI := dataZ*dY + dataY*dX + dataOffset
+			blockI := blockZ*bY + blockY*bX + blockOffset
+			copy(block.V[blockI:blockI+bytes], data[dataI:dataI+bytes])
+			blockY++
 		}
+		blockZ++
+	}
 
 
-*/ 
+*/
 
 // ?! Use blank block if completely outside of ROI
-
 
 // handleImageReq returns an image with appropriate Content-Type set.
 // This function allows arbitrary offset and size and pads response if needed.
@@ -698,7 +691,7 @@ func (d *Data) handleImageReq(w http.ResponseWriter, r *http.Request, parts []st
 
 func (d *Data) serveVolume(w http.ResponseWriter, r *http.Request, size dvid.Point3d, offset dvid.Point3d, formatstr string) error {
 	w.Header().Set("Content-type", "application/octet-stream")
-	
+
 	// ?! check if completely outside -- blank out
 
 	// ?! check if partially outside -- patch (which means no compression fetch)
@@ -714,15 +707,13 @@ func (d *Data) serveVolume(w http.ResponseWriter, r *http.Request, size dvid.Poi
 		return err
 	}
 	timedLog.Infof("PROXY HTTP GET to BOSS, %d bytes\n", len(res))
-		
+
 	if _, err = w.Write(res); err != nil {
 		return err
 	}
 
 	return nil
 }
-
-
 
 // DoRPC handles the 'generate' command.
 func (d *Data) DoRPC(request datastore.Request, reply *datastore.Response) error {
@@ -743,7 +734,7 @@ func (d *Data) MarshalJSON() ([]byte, error) {
 
 	// temporary hack to make "bossuint8blk" look like "uint8blk"
 	// TODO: refactor DVID to allow for a list of supported interfaces
-	metabytes = bytes.Replace(metabytes,  []byte("bossuint8blk"), []byte("uint8blk"), 1) 
+	metabytes = bytes.Replace(metabytes, []byte("bossuint8blk"), []byte("uint8blk"), 1)
 	return metabytes, nil
 }
 
@@ -775,10 +766,9 @@ func (d *Data) MarshalJSONExtents(ctx *datastore.VersionedCtx) ([]byte, error) {
 
 	// temporary hack to make "bossuint8blk" look like "uint8blk"
 	// TODO: refactor DVID to allow for a list of supported interfaces
-	metabytes = bytes.Replace(metabytes,  []byte("bossuint8blk"), []byte("uint8blk"), 1) 
+	metabytes = bytes.Replace(metabytes, []byte("bossuint8blk"), []byte("uint8blk"), 1)
 	return metabytes, nil
 }
-
 
 // ServeHTTP handles all incoming HTTP requests for this data.
 func (d *Data) ServeHTTP(uuid dvid.UUID, ctx *datastore.VersionedCtx, w http.ResponseWriter, r *http.Request) (activity map[string]interface{}) {
