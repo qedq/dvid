@@ -300,6 +300,10 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 
 // NewData returns a pointer to new bossuint8blk data with default values.
 func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.InstanceName, c dvid.Config) (datastore.DataService, error) {
+	// inject jpeg compression type to make it appear as JPEG
+	// TODO: support native BOSS format
+	c.Set("Compression", "jpeg")
+
 	// Make sure we have needed collection, experiment, and channel names.
 	collection, found, err := c.GetString("collection")
 	if err != nil {
@@ -469,7 +473,6 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 	}
 
 	url := fmt.Sprintf(CutOut, d.Collection, d.Experiment, d.Channel, d.Scale, offset[0], offset[0]+size[0], offset[1], offset[1]+size[1], offset[2], offset[2]+size[2])
-	fmt.Println(url)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	// ?! support download formats in addition to JPEG
 	req.Header.Set("Accept", "image/jpeg")
