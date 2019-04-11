@@ -7,6 +7,8 @@ package bossuint8blk
 import (
 	"encoding/gob"
 	"encoding/json"
+	"image/jpeg"
+	"image"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -21,6 +23,7 @@ import (
 	"github.com/janelia-flyem/dvid/server"
 	"github.com/janelia-flyem/dvid/storage"
 	"github.com/janelia-flyem/dvid/datatype/imageblk"
+	lz4 "github.com/janelia-flyem/go/golz4-updated"
 )
 
 const (
@@ -36,7 +39,7 @@ const (
 
 
 	// https://api.theboss.io/v1/cutout/:collection/:experiment/:channel/:res/:xmin:xmax/:ymin::ymax/:zmin::zmax
-	CutOut = "https://api.theboss.io/v1/cutout/%s/%s/%s/%d/%d:%d/%d:%d/%d:%d"
+	CutOut = "https://api.theboss.io/v1/cutout/%s/%s/%s/%d/%d:%d/%d:%d/%d:%d?iso=true"
 )
 
 const helpMessage = `
@@ -90,7 +93,48 @@ GET  <api URL>/node/<UUID>/<data name>/info
     UUID          Hexadecimal string with enough characters to uniquely identify a version node.
     data name     Name of bossuint8blk data.
 
+GET  <api URL>/node/<UUID>/<data name>/raw/<dims>/<size>/<offset>[/<format>][?queryopts]
 
+    Retrieves either 2d images (PNG by default) or 3d binary data, depending on the dims parameter.  
+    The 3d binary data response has "Content-type" set to "application/octet-stream" and is an array of 
+    voxel values in ZYX order (X iterates most rapidly).
+
+    Example: 
+
+    GET <api URL>/node/3f8c/segmentation/raw/0_1/512_256/0_0_100/jpg:80
+
+    Returns a raw XY slice (0th and 1st dimensions) with width (x) of 512 voxels and
+    height (y) of 256 voxels with offset (0,0,100) in JPG format with quality 80.
+    By "raw", we mean that no additional processing is applied based on voxel
+    resolutions to make sure the retrieved image has isotropic pixels.
+    The example offset assumes the "grayscale" data in version node "3f8c" is 3d.
+    The "Content-type" of the HTTP response should agree with the requested format.
+    For example, returned PNGs will have "Content-type" of "image/png", and returned
+    nD data will be "application/octet-stream". 
+
+    Arguments:
+
+    UUID          Hexadecimal string with enough characters to uniquely identify a version node.
+    data name     Name of data to add.
+    dims          The axes of data extraction in form "i_j_k,..."  
+                    Slice strings ("xy", "xz", or "yz") are also accepted.
+                    Example: "0_2" is XZ, and "0_1_2" is a 3d subvolume.
+    size          Size in voxels along each dimension specified in <dims>.
+    offset        Gives coordinate of first voxel using dimensionality of data.
+    format        Valid formats depend on the dimensionality of the request and formats
+                    available in server implementation.
+                  2D: "png", "jpg" (default: "png")
+                    jpg allows lossy quality setting, e.g., "jpg:80"
+                  nD: uses default "octet-stream".
+
+    Query-string Options:
+
+    compression   Allows retrieval or submission of 3d data in "snappy (default) or "lz4" format.  
+                     The 2d data will ignore this and use the image-based codec.
+  	scale         Default is 0.  For scale N, returns an image down-sampled by a factor of 2^N.
+    throttle      Only works for 3d data requests.  If "true", makes sure only N compute-intense operation 
+    				(all API calls that can be throttled) are handled.  If the server can't initiate the API 
+    				call right away, a 503 (Service Unavailable) status code is returned.
 `
 
 var (
@@ -419,6 +463,69 @@ func (dtype *Type) Do(cmd datastore.Request, reply *datastore.Response) error {
 	return fmt.Errorf("unknown command for type %s", dtype.GetTypeName())
 }
 
+// fetchData calls BOSS and returns binary data in supplied format.
+// This function does not handle patching or writing to http.
+func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr string) ([]byte, error) {
+	timedLog := dvid.NewTimeLog()
+	
+	client, err := d.GetClient()
+	if err != nil {
+		return nil, err
+	}
+	
+	url := fmt.Sprintf(CutOut, d.Collection, d.Experiment, d.Channel, d.Scale, offset[0], offset[0]+size[0], offset[1], offset[1]+size[1], offset[2], offset[2]+size[2])
+	fmt.Println(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	// ?! support download formats in addition to JPEG
+	req.Header.Set("Accept", "image/jpeg")
+
+	// set authorization token
+	err = setAuthorization(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// perform request
+	resp, err := client.Do(req)
+	defer resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("request failed")
+	}
+	timedLog.Infof("PROXY HTTP to BOSS: %s, returned response %d", url, resp.StatusCode)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Unexpected status code %d on volume request (%q, channel %q)", resp.StatusCode, d.DataName(), d.Channel)
+	}
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err	
+	}
+
+	if formatstr == "jpeg" || formatstr == "jpg" {
+		return data, nil
+	}
+	
+	// decompress JPEG 
+	b := bytes.NewBuffer(data)
+	imgdata, err := jpeg.Decode(b)
+	if err != nil {
+		return nil, err
+	}
+	data = imgdata.(*image.Gray).Pix
+
+	switch formatstr {
+	case "lz4":
+		lz4data := make([]byte, lz4.CompressBound(data))
+		_, err := lz4.Compress(data, lz4data)
+		if err != nil {
+			return nil, err
+		}
+		return lz4data, nil
+	default: // raw binary 
+		return data, nil
+	}
+	return data, nil
+}
 
 func (d *Data) GobDecode(b []byte) error {
 	buf := bytes.NewBuffer(b)
@@ -500,6 +607,121 @@ func (d *Data) GetClient() (*http.Client, error) {
 func (d *Data) Help() string {
 	return helpMessage
 }
+
+// BackgroundBlock returns a block buffer that has been preinitialized to the background value.
+func (d *Data) BackgroundBlock() []byte {
+	numElements := d.BlockSize.Prod()
+	bytesPerElement := int64(1)
+	blockData := make([]byte, numElements*bytesPerElement)
+	if d.Background != 0 && bytesPerElement == 1 {
+		background := byte(d.Background)
+		for i := range blockData {
+			blockData[i] = background
+		}
+	}
+	return blockData
+}
+
+// ?! support outside regions by 1) reading cropped volume and
+// 2) creating a blank block, 3) filling in the blank block with something
+// like the following:
+/*
+		blockOffset := blockBegX * bytesPerVoxel
+		dX := int64(v.Size().Value(0)) * bytesPerVoxel
+		dY := int64(v.Size().Value(1)) * dX
+		dataOffset := int64(dataBeg.Value(0)) * bytesPerVoxel
+		bytes := int64(dataEnd.Value(0)-dataBeg.Value(0)+1) * bytesPerVoxel
+		blockZ := blockBegZ
+
+		for dataZ := int64(dataBeg.Value(2)); dataZ <= int64(dataEnd.Value(2)); dataZ++ {
+			blockY := blockBegY
+			for dataY := int64(dataBeg.Value(1)); dataY <= int64(dataEnd.Value(1)); dataY++ {
+				dataI := dataZ*dY + dataY*dX + dataOffset
+				blockI := blockZ*bY + blockY*bX + blockOffset
+				copy(block.V[blockI:blockI+bytes], data[dataI:dataI+bytes])
+				blockY++
+			}
+			blockZ++
+		}
+
+
+*/ 
+
+// ?! Use blank block if completely outside of ROI
+
+
+// handleImageReq returns an image with appropriate Content-Type set.
+// This function allows arbitrary offset and size and pads response if needed.
+func (d *Data) handleImageReq(w http.ResponseWriter, r *http.Request, parts []string) error {
+	if len(parts) < 7 {
+		return fmt.Errorf("%q must be followed by shape/size/offset", parts[3])
+	}
+	shapeStr, sizeStr, offsetStr := parts[4], parts[5], parts[6]
+	planeStr := dvid.DataShapeString(shapeStr)
+	plane, err := planeStr.DataShape()
+	if err != nil {
+		return err
+	}
+
+	var size dvid.Point
+	if size, err = dvid.StringToPoint(sizeStr, "_"); err != nil {
+		return err
+	}
+	offset, err := dvid.StringToPoint3d(offsetStr, "_")
+	if err != nil {
+		return err
+	}
+
+	switch plane.ShapeDimensions() {
+	case 2:
+		return fmt.Errorf("Not yet implemented")
+		/* TODO handle 2D
+		var formatStr string
+		if len(parts) >= 8 {
+			formatStr = parts[7]
+		}
+		if formatStr == "" {
+			formatStr = DefaultTileFormat
+		}
+
+		return d.serveTile(w, r, geom, formatStr, false)
+		*/
+	case 3:
+		if len(parts) >= 8 {
+			return d.serveVolume(w, r, size.(dvid.Point3d), offset, parts[7])
+		} else {
+			return d.serveVolume(w, r, size.(dvid.Point3d), offset, "")
+		}
+	}
+	return nil
+}
+
+func (d *Data) serveVolume(w http.ResponseWriter, r *http.Request, size dvid.Point3d, offset dvid.Point3d, formatstr string) error {
+	w.Header().Set("Content-type", "application/octet-stream")
+	
+	// ?! check if completely outside -- blank out
+
+	// ?! check if partially outside -- patch (which means no compression fetch)
+
+	// ?! use compression flag only for specific blocks -- should call with formatstr
+	//queryStrings := r.URL.Query()
+	//compression := queryStrings.Get("compression")
+
+	// If we are within volume, get data from Boss
+	timedLog := dvid.NewTimeLog()
+	res, err := d.fetchData(size, offset, formatstr)
+	if err != nil {
+		return err
+	}
+	timedLog.Infof("PROXY HTTP GET to BOSS, %d bytes\n", len(res))
+		
+	if _, err = w.Write(res); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 
 
 // DoRPC handles the 'generate' command.
@@ -588,6 +810,7 @@ func (d *Data) ServeHTTP(uuid dvid.UUID, ctx *datastore.VersionedCtx, w http.Res
 		fmt.Fprintln(w, d.Help())
 
 	case "info":
+		// Potential TODO: re-query and reset extents everytime called
 		jsonBytes, err := d.MarshalJSONExtents(ctx)
 		if err != nil {
 			server.BadRequest(w, r, err)
@@ -595,8 +818,21 @@ func (d *Data) ServeHTTP(uuid dvid.UUID, ctx *datastore.VersionedCtx, w http.Res
 		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, string(jsonBytes))
-	// ?! extents -- which will re-query frame and re-set if changed
-	// ?! raw, specific blocks -- need to check boundary and pad
+	case "raw":
+		queryStrings := r.URL.Query()
+		if throttle := queryStrings.Get("throttle"); throttle == "on" || throttle == "true" {
+			if server.ThrottledHTTP(w) {
+				return
+			}
+			defer server.ThrottledOpDone()
+		}
+		if err := d.handleImageReq(w, r, parts); err != nil {
+			server.BadRequest(w, r, err)
+			return
+		}
+		timedLog.Infof("HTTP %s: image (%s)", r.Method, r.URL)
+
+	// ?! specific blocks, subvolblocks
 
 	default:
 		server.BadAPIRequest(w, r, d)
