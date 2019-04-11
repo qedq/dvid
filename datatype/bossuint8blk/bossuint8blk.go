@@ -199,6 +199,10 @@ type Properties struct {
 	Frame      string
 	Scale      int
 
+	// Load defaults into Values to match uint8blk interface
+	Values	   dvid.DataValues
+
+
 	// Block size for this repo
 	// For now, just do 64,64,64 and not native blocks
 	// TODO: support native block resolution
@@ -451,6 +455,12 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 			Background: background_final,
 			Resolution: resolution,
 			Extents:    extents,
+			Values: dvid.DataValues{
+				{
+					T:     dvid.T_uint8,
+					Label: "uint8",
+				},
+			},
 		},
 		client: &bossClient,
 	}
@@ -562,6 +572,7 @@ func (d *Data) CopyPropertiesFrom(src datastore.DataService, fs storage.FilterSp
 	d.Channel = d2.Channel
 	d.Frame = d2.Frame
 	d.Scale = d2.Scale
+	copy(d.Values, d2.Values)
 
 	d.BlockSize = d2.BlockSize.Duplicate()
 	d.Properties.Extents = d2.Properties.Extents.Duplicate()
