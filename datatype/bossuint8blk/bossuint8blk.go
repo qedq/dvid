@@ -6,9 +6,9 @@ package bossuint8blk
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
-	"encoding/binary"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -270,8 +270,6 @@ func (d *Data) SendBlockSimple(w http.ResponseWriter, x, y, z int32, data []byte
 	return nil
 }
 
-
-
 // SendBlocksSpecific writes data to the blocks specified -- best for non-ordered backend
 func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWriter, compression string, blockstring string, isprefetch bool) (numBlocks int, err error) {
 	w.Header().Set("Content-type", "application/octet-stream")
@@ -280,7 +278,7 @@ func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWr
 		err = fmt.Errorf("don't understand 'compression' query string value: %s", compression)
 		return
 	}
-	
+
 	// treat jpeg as the default
 	formatstr := compression
 	if compression != "uncompressed" {
@@ -304,7 +302,6 @@ func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWr
 	// make a finished queue
 	finishedRequests := make(chan error, len(coordarray)/3)
 	var mutex sync.Mutex
-
 
 	// iterate through each block and query
 	for i := 0; i < len(coordarray); i += 3 {
@@ -335,7 +332,7 @@ func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWr
 
 			// retrieve value (jpeg or raw)
 			block3d := d.BlockSize.(dvid.Point3d)
-			offset := dvid.Point3d{xloc*block3d[0], yloc*block3d[1], zloc*block3d[2]}
+			offset := dvid.Point3d{xloc * block3d[0], yloc * block3d[1], zloc * block3d[2]}
 			//offset := dvid.Point3d{166*block3d[0], 214*block3d[1], 14*block3d[2]}
 			data, err := d.fetchData(d.BlockSize.(dvid.Point3d), offset, formatstr)
 
@@ -365,9 +362,6 @@ func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWr
 	return
 }
 
-
-
-
 // Properties are additional properties for keyvalue data instances beyond those
 // in standard datastore.Data.   These will be persisted to metadata storage.
 type Properties struct {
@@ -379,8 +373,7 @@ type Properties struct {
 	Scale      int
 
 	// Load defaults into Values to match uint8blk interface
-	Values	   dvid.DataValues
-
+	Values dvid.DataValues
 
 	// Block size for this repo
 	// For now, just do 64,64,64 and not native blocks
@@ -1018,7 +1011,7 @@ func (d *Data) ServeHTTP(uuid dvid.UUID, ctx *datastore.VersionedCtx, w http.Res
 		// GET <api URL>/node/<UUID>/<data name>/specificblocks?compression=&prefetch=false&blocks=x,y,z,x,y,z...
 		compression := queryStrings.Get("compression")
 		blocklist := queryStrings.Get("blocks")
-		
+
 		// TODO: support prefetching if possible
 		isprefetch := false
 		if prefetch := queryStrings.Get("prefetch"); prefetch == "on" || prefetch == "true" {
