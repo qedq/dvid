@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"math"
 
 	"github.com/janelia-flyem/dvid/datastore"
 	"github.com/janelia-flyem/dvid/datatype/imageblk"
@@ -69,7 +70,8 @@ $ dvid repo <UUID> new bossuint8blk <data name> <settings...>
     collection     Name of BOSS collection
     experiment     Name of BOSS experiment
     channel        Name of BOSS channel in experiment (must be 8bit)
-    level	   Downsample level to access channel (default: 0)
+    scale	   Downsample level to access channel (default: 0)
+    scalehack	   Fakes the volume to be isotropic by multiplying Z dimension
     background     Integer value that signifies background in any element (default: 0)
 
     ------------------
@@ -353,10 +355,12 @@ func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWr
 	if !isprefetch {
 		// wait for everything to finish if not prefetching
 		for i := 0; i < len(coordarray); i += 3 {
-			errjob := <-finishedRequests
+			// ?! TODO: handle 502 errors and other errors
+			<-finishedRequests
+			/*errjob := <-finishedRequests
 			if errjob != nil {
 				err = errjob
-			}
+			}*/
 		}
 	}
 	return
@@ -371,6 +375,10 @@ type Properties struct {
 	Channel    string
 	Frame      string
 	Scale      int
+	
+	// ScaleHack tries to make the data look isotropic
+	// z-coords will be stretched
+	ScaleHackFactor  float64
 
 	// Load defaults into Values to match uint8blk interface
 	Values dvid.DataValues
@@ -395,9 +403,10 @@ func (d *Data) Extents() *dvid.Extents {
 }
 
 // retrieveImageDetails determined the resolution for the specified scale level
-func retrieveImageDetails(scalestr string, collection string, experiment string, frame string, channel string, blockSize dvid.Point) (dvid.Resolution, dvid.Extents, error) {
+func retrieveImageDetails(scalestr string, collection string, experiment string, frame string, channel string, blockSize dvid.Point, scalehack bool) (dvid.Resolution, dvid.Extents, float64, error) {
 	var resolution dvid.Resolution
 	var extents dvid.Extents
+	scalehackfactor := float64(1.0)
 
 	bossClient := http.Client{
 		Timeout: time.Second * 60,
@@ -410,24 +419,24 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 	req_url := fmt.Sprintf(DownsampleInfo, collection, experiment, channel)
 	req, err := http.NewRequest(http.MethodGet, req_url, nil)
 	if err != nil {
-		return resolution, extents, err
+		return resolution, extents, scalehackfactor, err
 	}
 
 	// set authorization token
 	err = setAuthorization(req)
 	if err != nil {
-		return resolution, extents, err
+		return resolution, extents, scalehackfactor, err
 	}
 
 	// perform request
 	res, err := bossClient.Do(req)
 	if err != nil {
-		return resolution, extents, fmt.Errorf("request failed")
+		return resolution, extents, scalehackfactor, fmt.Errorf("request failed")
 	}
 
 	downbody, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		return resolution, extents, fmt.Errorf("request failed")
+		return resolution, extents, scalehackfactor, fmt.Errorf("request failed")
 	}
 	res.Body.Close()
 
@@ -437,17 +446,24 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 		VoxelSizes   map[string][]float32 `json:"voxel_size"`
 	}
 	if err = json.Unmarshal(downbody, &down); err != nil {
-		return resolution, extents, err
+		return resolution, extents, scalehackfactor, err
 	}
 
 	var maxbound []int32
 	ok := true
 	if maxbound, ok = down.ScaleExtents[scalestr]; !ok {
-		return resolution, extents, fmt.Errorf("Bounding box not found for scale")
+		return resolution, extents, scalehackfactor, fmt.Errorf("Bounding box not found for scale")
 	}
 	var voxelsize []float32
 	if voxelsize, ok = down.VoxelSizes[scalestr]; !ok {
-		return resolution, extents, fmt.Errorf("Voxel size not found for scale")
+		return resolution, extents, scalehackfactor, fmt.Errorf("Voxel size not found for scale")
+	}
+
+	// make data more istropic
+	if scalehack {
+		scalehackfactor = float64(voxelsize[2]/voxelsize[1])
+		voxelsize[2] = voxelsize[2]/float32(scalehackfactor)
+		maxbound[2] = int32(math.Round(float64(maxbound[2]) * scalehackfactor))
 	}
 
 	// init resolution datastructure
@@ -469,7 +485,7 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 	extents.MinIndex = minpoint.ChunkIndexer(blockSize3d)
 	extents.MaxIndex = maxpoint.ChunkIndexer(blockSize3d)
 
-	return resolution, extents, nil
+	return resolution, extents, scalehackfactor, nil
 }
 
 // --- TypeService interface ---
@@ -514,6 +530,17 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 		scale, err = strconv.Atoi(scalestr)
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	scalehackstr, found, err := c.GetString("scalehack")
+	if err != nil {
+		return nil, err
+	}
+	scalehack := false
+	if found {
+		if scalehackstr == "true" {
+			scalehack = true
 		}
 	}
 
@@ -605,7 +632,7 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 	}
 
 	// load extents and voxel size information
-	resolution, extents, err := retrieveImageDetails(scalestr, collection, experiment, frame, channel, blockSize)
+	resolution, extents, scalehackfactor, err := retrieveImageDetails(scalestr, collection, experiment, frame, channel, blockSize, scalehack)
 	if err != nil {
 		return nil, err
 	}
@@ -623,6 +650,7 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 			Channel:    channel,
 			Frame:      frame,
 			Scale:      scale,
+			ScaleHackFactor:  scalehackfactor,
 			BlockSize:  blockSize,
 			Background: background_final,
 			Resolution: resolution,
@@ -654,8 +682,21 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 		return nil, err
 	}
 
-	url := fmt.Sprintf(CutOut, d.Collection, d.Experiment, d.Channel, d.Scale, offset[0], offset[0]+size[0], offset[1], offset[1]+size[1], offset[2], offset[2]+size[2])
+	offsetnew := offset.Duplicate().(dvid.Point3d)
+	sizenew := size.Duplicate().(dvid.Point3d)
+	
+	// apply hack if enabled and relevant (automatic scale z)
+	if d.Properties.ScaleHackFactor != 1.0 {
+		offsetnew[2] = int32(math.Round(float64(offsetnew[2]) / d.Properties.ScaleHackFactor))
+		sizenew[2] = int32(math.Round(float64(sizenew[2]) / d.Properties.ScaleHackFactor))
+		if sizenew[2] == 0 {
+			sizenew[2] = 1
+		}
+	}
+
+	url := fmt.Sprintf(CutOut, d.Collection, d.Experiment, d.Channel, d.Scale, offsetnew[0], offsetnew[0]+sizenew[0], offsetnew[1], offsetnew[1]+sizenew[1], offsetnew[2], offsetnew[2]+sizenew[2])
 	req, err := http.NewRequest(http.MethodGet, url, nil)
+	
 	// ?! support download formats in addition to JPEG
 	req.Header.Set("Accept", "image/jpeg")
 
@@ -667,8 +708,8 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 
 	// perform request
 	resp, err := client.Do(req)
-	defer resp.Body.Close()
 	if err != nil {
+		fmt.Println(err)
 		return nil, fmt.Errorf("request failed")
 	}
 	timedLog.Infof("PROXY HTTP to BOSS: %s, returned response %d", url, resp.StatusCode)
@@ -680,6 +721,43 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
+
+	// hack to re-scale request
+	if d.Properties.ScaleHackFactor != 1.0 {
+		// decompress JPEG
+		b := bytes.NewBuffer(data)
+		imgdata, err := jpeg.Decode(b)
+		if err != nil {
+			return nil, err
+		}
+		dataraw := imgdata.(*image.Gray).Pix
+
+		// make expanded buffer
+		dataexpand := make([]uint8, size[0]*size[1]*size[2])
+
+		iter1 := 0
+		for z := 0; z < int(size[2]); z++ {
+			iter2 := int32(float64(z)/d.Properties.ScaleHackFactor) * (size[0]*size[1])
+			for y := 0; y < int(size[1]); y++ {
+				for x := 0; x < int(size[0]); x++ {
+					dataexpand[iter1] = dataraw[iter2]
+					iter1 += 1
+					iter2 += 1
+				}
+			}
+		}
+
+		// compress back to jpeg
+		var buf bytes.Buffer
+		img := image.NewGray(image.Rect(0, 0, int(size[0]), int(size[1]*size[2])))
+		img.Pix = dataexpand
+
+		if err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
+			return nil, err
+		}
+		data = buf.Bytes()
+	} 
 
 	if formatstr == "jpeg" || formatstr == "jpg" {
 		return data, nil
@@ -744,6 +822,7 @@ func (d *Data) CopyPropertiesFrom(src datastore.DataService, fs storage.FilterSp
 	d.Channel = d2.Channel
 	d.Frame = d2.Frame
 	d.Scale = d2.Scale
+	d.ScaleHackFactor = d2.ScaleHackFactor
 	copy(d.Values, d2.Values)
 
 	d.BlockSize = d2.BlockSize.Duplicate()
