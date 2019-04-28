@@ -273,18 +273,24 @@ func (d *Data) SendBlockSimple(w http.ResponseWriter, x, y, z int32, data []byte
 }
 
 // SendBlocksSpecific writes data to the blocks specified -- best for non-ordered backend
-func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWriter, compression string, blockstring string, isprefetch bool) (numBlocks int, err error) {
+func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWriter, compression string, blockstring string, isprefetch bool, isrescale bool, usenative bool) (numBlocks int, err error) {
 	w.Header().Set("Content-type", "application/octet-stream")
 
-	if compression != "uncompressed" && compression != "jpeg" && compression != "" {
+	if compression != "uncompressed" && compression != "jpeg" && compression != "" && compression != "blosc" {
 		err = fmt.Errorf("don't understand 'compression' query string value: %s", compression)
 		return
 	}
 
 	// treat jpeg as the default
 	formatstr := compression
-	if compression != "uncompressed" {
+	if compression != "uncompressed" && compression != "blosc" {
 		formatstr = "jpeg"
+	}
+
+	// blosc cannot be used if there is re-scaling
+	if compression == "blosc" && d.Properties.ScaleHackFactor != 1.0 && isrescale && !usenative {
+		err = fmt.Errorf("BLOSC not allowed for re-scaling")
+		return
 	}
 
 	timedLog := dvid.NewTimeLog()
@@ -334,8 +340,16 @@ func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWr
 
 			// retrieve value (jpeg or raw)
 			block3d := d.BlockSize.(dvid.Point3d)
+			// hack to work with native resolution 512x512x16
+			// TODO: make dynamic
+			if usenative {
+				block3d[0] = 512
+				block3d[1] = 512
+				block3d[2] = 16
+			}
 			offset := dvid.Point3d{xloc * block3d[0], yloc * block3d[1], zloc * block3d[2]}
-			data, err := d.fetchData(d.BlockSize.(dvid.Point3d), offset, formatstr)
+
+			data, err := d.fetchData(block3d, offset, formatstr, isrescale, usenative)
 
 			timedLog.Infof("BOSS PROXY HTTP GET BLOCK, %d bytes\n", len(data))
 
@@ -408,7 +422,7 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 	scalehackfactor := float64(1.0)
 
 	bossClient := http.Client{
-		Timeout: time.Second * 60,
+		Timeout: time.Second * 180,
 	}
 
 	// assume nanometers is the only unit for now
@@ -565,7 +579,7 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 
 	// create client
 	bossClient := http.Client{
-		Timeout: time.Second * 60,
+		Timeout: time.Second * 180,
 	}
 
 	// request experiment info
@@ -673,8 +687,13 @@ func (dtype *Type) Do(cmd datastore.Request, reply *datastore.Response) error {
 
 // fetchData calls BOSS and returns binary data in supplied format.
 // This function does not handle patching or writing to http.
-func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr string) ([]byte, error) {
+func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr string, isrescale bool, usenative bool) ([]byte, error) {
 	timedLog := dvid.NewTimeLog()
+
+	// blosc cannot be used if there is re-scaling
+	if formatstr == "blosc" && d.Properties.ScaleHackFactor != 1.0 && isrescale && !usenative {
+		return nil, fmt.Errorf("BLOSC not allowed for re-scaling")
+	}
 
 	client, err := d.GetClient()
 	if err != nil {
@@ -685,7 +704,7 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 	sizenew := size.Duplicate().(dvid.Point3d)
 
 	// apply hack if enabled and relevant (automatic scale z)
-	if d.Properties.ScaleHackFactor != 1.0 {
+	if !usenative && d.Properties.ScaleHackFactor != 1.0 {
 		offsetnew[2] = int32(math.Round(float64(offsetnew[2]) / d.Properties.ScaleHackFactor))
 		sizenew[2] = int32(math.Round(float64(sizenew[2]) / d.Properties.ScaleHackFactor))
 		if sizenew[2] == 0 {
@@ -696,8 +715,12 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 	url := fmt.Sprintf(CutOut, d.Collection, d.Experiment, d.Channel, d.Scale, offsetnew[0], offsetnew[0]+sizenew[0], offsetnew[1], offsetnew[1]+sizenew[1], offsetnew[2], offsetnew[2]+sizenew[2])
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 
-	// ?! support download formats in addition to JPEG
-	req.Header.Set("Accept", "image/jpeg")
+	// support download formats in addition to JPEG
+	if formatstr == "blosc" {
+		req.Header.Set("Accept", "application/blosc")
+	} else { 
+		req.Header.Set("Accept", "image/jpeg")
+	}
 
 	// set authorization token
 	err = setAuthorization(req)
@@ -732,7 +755,7 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 	}
 
 	// hack to re-scale request
-	if d.Properties.ScaleHackFactor != 1.0 {
+	if !usenative && isrescale && d.Properties.ScaleHackFactor != 1.0 {
 		// decompress JPEG
 		b := bytes.NewBuffer(data)
 		imgdata, err := jpeg.Decode(b)
@@ -767,7 +790,7 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 		data = buf.Bytes()
 	}
 
-	if formatstr == "jpeg" || formatstr == "jpg" {
+	if formatstr == "jpeg" || formatstr == "jpg" || formatstr == "blosc" {
 		return data, nil
 	}
 
@@ -864,7 +887,7 @@ func (d *Data) GetClient() (*http.Client, error) {
 	}
 
 	d.client = &http.Client{
-		Timeout: time.Second * 60,
+		Timeout: time.Second * 180,
 	}
 	return d.client, nil
 }
@@ -975,7 +998,7 @@ func (d *Data) serveVolume(w http.ResponseWriter, r *http.Request, size dvid.Poi
 
 	// If we are within volume, get data from Boss
 	timedLog := dvid.NewTimeLog()
-	res, err := d.fetchData(size, offset, formatstr)
+	res, err := d.fetchData(size, offset, formatstr, true, false)
 	if err != nil {
 		return err
 	}
@@ -1106,8 +1129,19 @@ func (d *Data) ServeHTTP(uuid dvid.UUID, ctx *datastore.VersionedCtx, w http.Res
 			server.BadRequest(w, r, "BOSS proxy does not support prefetch")
 		}
 
+		isrescale := true // default true if scaling is needed
+		if rescale := queryStrings.Get("rescale"); rescale == "off" || rescale == "false" {
+			isrescale = false
+		}
+
+		// HACK for testing: default false (turn on to use native 128x128x16) 
+		usenative := false 
+		if native := queryStrings.Get("usenative"); native == "on" || native == "true" {
+			usenative = true
+		}
+
 		if action == "get" {
-			numBlocks, err := d.SendBlocksSpecific(ctx, w, compression, blocklist, isprefetch)
+			numBlocks, err := d.SendBlocksSpecific(ctx, w, compression, blocklist, isprefetch, isrescale, usenative)
 			if err != nil {
 				server.BadRequest(w, r, err)
 				return
