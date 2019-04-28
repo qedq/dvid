@@ -13,13 +13,13 @@ import (
 	"image"
 	"image/jpeg"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"math"
 
 	"github.com/janelia-flyem/dvid/datastore"
 	"github.com/janelia-flyem/dvid/datatype/imageblk"
@@ -335,7 +335,6 @@ func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWr
 			// retrieve value (jpeg or raw)
 			block3d := d.BlockSize.(dvid.Point3d)
 			offset := dvid.Point3d{xloc * block3d[0], yloc * block3d[1], zloc * block3d[2]}
-			//offset := dvid.Point3d{166*block3d[0], 214*block3d[1], 14*block3d[2]}
 			data, err := d.fetchData(d.BlockSize.(dvid.Point3d), offset, formatstr)
 
 			timedLog.Infof("BOSS PROXY HTTP GET BLOCK, %d bytes\n", len(data))
@@ -375,10 +374,10 @@ type Properties struct {
 	Channel    string
 	Frame      string
 	Scale      int
-	
+
 	// ScaleHack tries to make the data look isotropic
 	// z-coords will be stretched
-	ScaleHackFactor  float64
+	ScaleHackFactor float64
 
 	// Load defaults into Values to match uint8blk interface
 	Values dvid.DataValues
@@ -461,8 +460,8 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 
 	// make data more istropic
 	if scalehack {
-		scalehackfactor = float64(voxelsize[2]/voxelsize[1])
-		voxelsize[2] = voxelsize[2]/float32(scalehackfactor)
+		scalehackfactor = float64(voxelsize[2] / voxelsize[1])
+		voxelsize[2] = voxelsize[2] / float32(scalehackfactor)
 		maxbound[2] = int32(math.Round(float64(maxbound[2]) * scalehackfactor))
 	}
 
@@ -645,16 +644,16 @@ func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.
 	data := &Data{
 		Data: basedata,
 		Properties: Properties{
-			Collection: collection,
-			Experiment: experiment,
-			Channel:    channel,
-			Frame:      frame,
-			Scale:      scale,
-			ScaleHackFactor:  scalehackfactor,
-			BlockSize:  blockSize,
-			Background: background_final,
-			Resolution: resolution,
-			Extents:    extents,
+			Collection:      collection,
+			Experiment:      experiment,
+			Channel:         channel,
+			Frame:           frame,
+			Scale:           scale,
+			ScaleHackFactor: scalehackfactor,
+			BlockSize:       blockSize,
+			Background:      background_final,
+			Resolution:      resolution,
+			Extents:         extents,
 			Values: dvid.DataValues{
 				{
 					T:     dvid.T_uint8,
@@ -684,7 +683,7 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 
 	offsetnew := offset.Duplicate().(dvid.Point3d)
 	sizenew := size.Duplicate().(dvid.Point3d)
-	
+
 	// apply hack if enabled and relevant (automatic scale z)
 	if d.Properties.ScaleHackFactor != 1.0 {
 		offsetnew[2] = int32(math.Round(float64(offsetnew[2]) / d.Properties.ScaleHackFactor))
@@ -696,7 +695,7 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 
 	url := fmt.Sprintf(CutOut, d.Collection, d.Experiment, d.Channel, d.Scale, offsetnew[0], offsetnew[0]+sizenew[0], offsetnew[1], offsetnew[1]+sizenew[1], offsetnew[2], offsetnew[2]+sizenew[2])
 	req, err := http.NewRequest(http.MethodGet, url, nil)
-	
+
 	// ?! support download formats in addition to JPEG
 	req.Header.Set("Accept", "image/jpeg")
 
@@ -706,22 +705,31 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 		return nil, err
 	}
 
-	// perform request
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Println(err)
-		return nil, fmt.Errorf("request failed")
-	}
-	timedLog.Infof("PROXY HTTP to BOSS: %s, returned response %d", url, resp.StatusCode)
+	var data []byte
+	// repeat loop if resource is busy (currently no request backoff)
+	for {
+		// perform request
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Println(err)
+			return nil, fmt.Errorf("request failed")
+		}
+		timedLog.Infof("PROXY HTTP to BOSS: %s, returned response %d", url, resp.StatusCode)
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Unexpected status code %d on volume request (%q, channel %q)", resp.StatusCode, d.DataName(), d.Channel)
+		// make sure resource is not busy
+		if resp.StatusCode < 500 || resp.StatusCode >= 600 {
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("Unexpected status code %d on volume request (%q, channel %q)", resp.StatusCode, d.DataName(), d.Channel)
+			}
+
+			data, err = ioutil.ReadAll(resp.Body)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+			break
+		}
 	}
-	data, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
 
 	// hack to re-scale request
 	if d.Properties.ScaleHackFactor != 1.0 {
@@ -738,7 +746,7 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 
 		iter1 := 0
 		for z := 0; z < int(size[2]); z++ {
-			iter2 := int32(float64(z)/d.Properties.ScaleHackFactor) * (size[0]*size[1])
+			iter2 := int32(float64(z)/d.Properties.ScaleHackFactor) * (size[0] * size[1])
 			for y := 0; y < int(size[1]); y++ {
 				for x := 0; x < int(size[0]); x++ {
 					dataexpand[iter1] = dataraw[iter2]
@@ -757,7 +765,7 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 			return nil, err
 		}
 		data = buf.Bytes()
-	} 
+	}
 
 	if formatstr == "jpeg" || formatstr == "jpg" {
 		return data, nil

@@ -28,7 +28,7 @@ endif
 CONDA_BASE = $(shell conda info --base)
 
 ifndef DVID_BACKENDS
-    DVID_BACKENDS = basholeveldb filestore gbucket swift
+    DVID_BACKENDS = basholeveldb filestore gbucket
     $(info Backend not specified. Using default value: DVID_BACKENDS="${DVID_BACKENDS}")
 endif
 
