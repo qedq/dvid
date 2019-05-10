@@ -512,7 +512,7 @@ func retrieveImageDetails(scalestr string, collection string, experiment string,
 func (dtype *Type) NewDataService(uuid dvid.UUID, id dvid.InstanceID, name dvid.InstanceName, c dvid.Config) (datastore.DataService, error) {
 	// inject jpeg compression type to make it appear as JPEG
 	// TODO: support native BOSS format
-	c.Set("Compression", "jpeg")
+	c.Set("Compression", "none")
 
 	// Make sure we have needed collection, experiment, and channel names.
 	collection, found, err := c.GetString("collection")
