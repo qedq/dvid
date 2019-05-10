@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -196,6 +197,7 @@ GET  <api URL>/node/<UUID>/<data name>/specificblocks[?queryopts]
 var (
 	DefaultBlkSize int32  = 64
 	BOSSToken      string = ""
+	ErrBadCutOut   error  = errors.New("Cut-out is outside image bounds")
 )
 
 func init() {
@@ -354,6 +356,11 @@ func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWr
 			timedLog.Infof("BOSS PROXY HTTP GET BLOCK, %d bytes\n", len(data))
 
 			if err != nil {
+				// ignore bad cutout errors, just leave block blank
+				if err == ErrBadCutOut {
+					err = nil
+				}
+
 				return
 			}
 			if !isprefetch {
@@ -368,12 +375,10 @@ func (d *Data) SendBlocksSpecific(ctx *datastore.VersionedCtx, w http.ResponseWr
 	if !isprefetch {
 		// wait for everything to finish if not prefetching
 		for i := 0; i < len(coordarray); i += 3 {
-			// ?! TODO: handle 502 errors and other errors
-			<-finishedRequests
-			/*errjob := <-finishedRequests
+			errjob := <-finishedRequests
 			if errjob != nil {
 				err = errjob
-			}*/
+			}
 		}
 	}
 	return
@@ -718,7 +723,7 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 	// support download formats in addition to JPEG
 	if formatstr == "blosc" {
 		req.Header.Set("Accept", "application/blosc")
-	} else { 
+	} else {
 		req.Header.Set("Accept", "image/jpeg")
 	}
 
@@ -742,6 +747,21 @@ func (d *Data) fetchData(size dvid.Point3d, offset dvid.Point3d, formatstr strin
 		// make sure resource is not busy
 		if resp.StatusCode < 500 || resp.StatusCode >= 600 {
 			if resp.StatusCode != http.StatusOK {
+				// check if the error is due to a bad-cutout
+				// ideally this should be checked before
+				// making the request but this solution is
+				// easier to implement
+				if resp.StatusCode == 400 {
+					data, err = ioutil.ReadAll(resp.Body)
+					if err != nil {
+						return nil, err
+					}
+					respstr := string(data)
+					if strings.Contains(respstr, "Incorrect cutout arguments") {
+						return nil, ErrBadCutOut
+					}
+				}
+
 				return nil, fmt.Errorf("Unexpected status code %d on volume request (%q, channel %q)", resp.StatusCode, d.DataName(), d.Channel)
 			}
 
@@ -1134,8 +1154,8 @@ func (d *Data) ServeHTTP(uuid dvid.UUID, ctx *datastore.VersionedCtx, w http.Res
 			isrescale = false
 		}
 
-		// HACK for testing: default false (turn on to use native 128x128x16) 
-		usenative := false 
+		// HACK for testing: default false (turn on to use native 128x128x16)
+		usenative := false
 		if native := queryStrings.Get("usenative"); native == "on" || native == "true" {
 			usenative = true
 		}
